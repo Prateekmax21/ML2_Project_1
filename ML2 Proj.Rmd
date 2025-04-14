@@ -1,0 +1,307 @@
+---
+title: "ML2 Project 1"
+output: html_document
+date: "2025-04-1"
+author: "Prateek Pagare"
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(tree)
+library(randomForest)
+library(gbm)
+```
+
+## Problem 1: Binary Classification – has or has not used Marijuana
+
+This section explores a binary classification tree to predict whether a respondent **has or has not used marijuana** (`MRJFLAG`). We use decision trees and pruning techniques to identify meaningful patterns in the data. The final result is evaluated using confusion matrices and error rates.
+
+```{r}
+# Load youth dataset
+df <- read_excel("youth_data.xlsx")
+head(df)
+summary(df)
+```
+
+To model whether a youth respondent has ever used marijuana (MRJFLAG), we first created a filtered version of the dataset that removes any variables directly tied to substance use, such as usage frequency or age of first use. This ensures we’re not accidentally “leaking” information from the target variable into our predictors\
+
+The response variable MRJFLAG\
+- 0: Has never used marijuana\
+- 1: Has ever used marijuana\
+
+```{r}
+# Prepare data by removing drug use predictors to avoid leakage
+mari_bin <- df %>%select(-IRMJFY, -IRMJAGE, -MRJYDAYS, -MRJMDAYS, -IRALCFY, -IRCIGFM, -IRSMKLSS30N,-IRALCFM, -IRMJFM, -IRCIGAGE, -IRSMKLSSTRY, -IRALCAGE, -ALCFLAG, -TOBFLAG,-ALCYDAYS, -ALCMDAYS, -CIGMDAYS, -SMKLSMDAYS) %>% mutate(MRJFLAG = as.factor(MRJFLAG)) %>% 
+drop_na(MRJFLAG)     #reference:https://www.spsanderson.com/steveondata/posts/2024-11-26/#:~:text=The%20select()%20function%20from%20the%20dplyr%20package%20provides%20a,specifying%20their%20names%20or%20indices.
+head(mari_bin)
+
+set.seed(1236)
+train_index <- sample(1:nrow(mari_bin), floor(0.7 * nrow(mari_bin)))
+train <- mari_bin[train_index, ]
+test <- mari_bin[-train_index, ]
+dim(train)
+dim(test)
+summary(df$MRJFLAG)
+table(mari_bin$MRJFLAG)
+```
+
+This shows that only \~15% of youth in our data reported ever using marijuana. The dataset is imbalanced, which means our model could lean toward predicting “0” more often unless properly adjusted.then\
+To train and evaluate the model, we split the dataset into 70% training and 30% testing sets.
+
+### Train a classification tree and evaluate
+
+```{r}
+tree_model <- tree(MRJFLAG ~ ., data = train)
+plot(tree_model)
+text(tree_model, pretty = 0)
+pred <- predict(tree_model, test, type = "class")
+conf_mat <- table(Predicted = pred, Actual = test$MRJFLAG)
+print(conf_mat)
+cat("Test Accuracy:", round(mean(pred == test$MRJFLAG) * 100, 2), "%\n")
+```
+The classification tree's top split variable is FRDMJMON, which captures peer disapproval toward marijuana use. Youths who reported their close friends disapprove (i.e., FRDMJMON = 1) were significantly more likely to have never used marijuana.\
+
+Further splits such as STNDSMJ (perception of other students using marijuana) and YFLTMRJ2 (how the youth feels about peer marijuana initiation) reinforce the role of social norms in shaping behavior. \
+The final key variable, YFLTMRJ2, measures how the youth personally feels about peers trying marijuana. Values below 1.5 mean they disapprove, which again aligns with lower likelihood of personal use. and also\
+
+The confusion matrix shows good separation between ever and never users. The model performs best at correctly classifying non-users, with a slight conservative bias\
+
+and accuracy 87.79 % ,  indicates that the model performs fairly well, correctly predicting nearly 88% of the test cases. However, there is some imbalance in prediction performance — it tends to be more conservative.\
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Cross-validation and pruning
+
+```{r}
+cv_model <- cv.tree(tree_model, FUN = prune.misclass)
+plot(cv_model$size, cv_model$dev, type = "b", main = "CV Error vs. Tree Size")
+opt_size <- cv_model$size[which.min(cv_model$dev)]
+pruned_model <- prune.misclass(tree_model, best = opt_size)
+pruned_model
+summary(pruned_model)
+```
+
+Using cross-validation for misclassification pruning, the optimal tree size was found to be 5 nodes. Interestingly, both the pruned and unpruned trees gave the same performance on both training and test sets — suggesting that the original tree already had good generalization without overfitting.
+
+
+
+
+
+
+### Compare errors
+
+```{r}
+train_pred_unpruned <- predict(tree_model, newdata = train, type = "class")
+train_pred_pruned <- predict(pruned_model, newdata = train, type = "class")
+train_error_unpruned <- mean(train_pred_unpruned != train$MRJFLAG)
+train_error_pruned <- mean(train_pred_pruned != train$MRJFLAG)
+cat("unpruned train error:", round(train_error_unpruned * 100, 2), "%\n")
+cat("pruned train error:", round(train_error_pruned * 100, 2), "%\n")
+
+pruned_pred <- predict(pruned_model, test, type = "class")
+cat("Unpruned test error :", round(mean(pred != test$MRJFLAG) * 100, 2), "%\n")
+cat("Pruned test error :", round(mean(pruned_pred != test$MRJFLAG) * 100, 2),"%\n")
+opt_size <- cv_model$size[which.min(cv_model$dev)]
+cat("Optimal Tree Size:", opt_size)
+```
+pruning the tree didn’t change the error rates — both the unpruned and pruned trees performed identically on training and test sets. This suggests the original tree was already quite balanced and not overfitting the data. 
+
+
+------------------------------------------------------------------------
+
+
+
+## Problem 2: Multi-class Classification – Monthly Marijuana Frequency
+
+This part uses decision trees and ensemble models to classify marijuana use in the past month into three categories: `Seldom`, `Sometimes`, and `Frequent`.and To align with project expectations and avoid data leakage, we carefully removed all variables directly linked to drug usage frequency (such as IRMJFY, IRALCFY, MRJFLAG, etc.). The remaining variables reflect demographic and behavioral traits that could help explain youth substance behavior without circular reasoning.
+
+```{r}
+mari_multi <- df %>%mutate(MRJMDAYS = case_when(MRJMDAYS == 1 ~ "Seldom",MRJMDAYS == 2 ~ "Sometimes",MRJMDAYS %in% c(3,4) ~ "Frequent",MRJMDAYS == 5 ~ NA_character_)) %>%drop_na(MRJMDAYS) %>%   
+mutate(MRJMDAYS = factor(MRJMDAYS, levels = c("Seldom", "Sometimes", "Frequent"))) %>%  
+  select(MRJMDAYS, everything(),-MRJFLAG, -IRMJFY, -IRMJAGE, -MRJYDAYS, -IRALCFY, -IRCIGFM,-IRSMKLSS30N, -IRALCFM, -IRMJFM, -IRCIGAGE, -IRSMKLSSTRY, -IRALCAGE,-ALCFLAG, -TOBFLAG, -ALCYDAYS, -ALCMDAYS, -CIGMDAYS, -SMKLSMDAYS) %>% mutate(across(everything(), ~replace_na(., 0))) #reference: https://dplyr.tidyverse.org/reference/mutate.html
+mari_multi
+summary(mari_multi$MRJMDAYS)
+#Data into Training and Test Sets
+set.seed(2025)
+ind <- sample(1:nrow(mari_multi), floor(0.7 * nrow(mari_multi)))
+train <- mari_multi[ind, ]
+test <- mari_multi[-ind, ]
+dim(train)
+dim(test)
+```
+
+In this, we use  predicting the frequency of marijuana use in the past month, categorized into three intuitive classes:\
+
+- Seldom (1–2 days)
+
+- Sometimes (3–5 days)
+
+- Frequent (6–30 days)\
+
+
+After cleaning and transforming the data:\
+Total Records (before split): 752\
+Training Set: 526 observations\
+Test Set: 226 observations\
+Target Variable: MRJMDAYS (3-class factor)\
+
+
+
+### Fit a Multiclass Classification Tree
+
+```{r}
+multi_tree <- tree(MRJMDAYS ~ ., data = train)
+summary(multi_tree)
+plot(multi_tree)
+text(multi_tree, pretty = 0)
+test_pred <- predict(multi_tree, newdata = test, type = "class")
+conf_mat <- table(Predicted = test_pred, Actual = test$MRJMDAYS)
+conf_mat
+cat("Test Error (Tree):", round(mean(test_pred != test$MRJMDAYS) * 100, 2), "%\n")
+```
+In this section, we applied a classification tree to predict marijuana use frequency during the past month, categorized as Seldom, Sometimes, and Frequent.
+
+The top node splits on EDUSKPCOM, which measures school skipping behavior. Youth who did not skip school (score < 1.5) tended to fall under Seldom use, supporting what we saw in the Penguin activity — attendance can serve as a behavioral anchor.
+
+Other predictors such as PRALDLY2 (perceived parental disapproval) and FRDMEVR2 (friends' attitude) consistently split nodes, matching the worksheet's emphasis on parental and peer influence.
+
+
+
+
+
+## Fit a Bagged Model
+
+```{r}
+bag_model <- randomForest(MRJMDAYS ~ ., data = train, mtry = 40, importance = TRUE)
+bag_model
+plot(bag_model)
+```
+ bagging to improve classification accuracy for monthly marijuana use (MRJMDAYS). The model trained 500 trees and used  predictors mtry = 40 at each split.and The overall  OOB error rate is 44.87%, which is a small improvement over the decision tree.as well The Frequent category is classified most accurately (only ~9.5% error).and The Sometimes group continues to be the weakes,The Seldom group also shows error of 78 %, The error rate stabilizes after ~100 trees, suggesting the ensembl  but further gains beyond 100 are marginal.
+
+
+
+
+## Predict and Evaluate Bagged Model on test data 
+
+```{r}
+bag_pred <- predict(bag_model, newdata = test, type = "class")
+bag_conf <- table(Predicted = bag_pred, Actual = test$MRJMDAYS)
+bag_conf
+bag_error <- mean(bag_pred != test$MRJMDAYS)
+cat("bagging test err :", round(bag_error * 100, 2), "%\n")
+```
+The overall test error rate is 48.23%, which slightly aligns with the OOB error observed during training, Frequent users are still predicted the best — 103 out of 192 were classified correctly.and only 13/62 Seldom users were correctly identified.along  Sometimes group continues to be very poorly predicted, 1 correct out of 51
+
+
+###Random Forest Model
+```{r}
+rf_model <- randomForest(MRJMDAYS ~ ., data = train, importance = TRUE)
+rf_model
+rf_pred <- predict(rf_model, newdata = test)
+rf_conf <- table(Predicted = rf_pred, Actual = test$MRJMDAYS)
+rf_conf
+cat("RandomForest test error:", round(mean(rf_pred != test$MRJMDAYS) * 100, 2), "%\n")
+varImpPlot(rf_model)
+```
+The overall test error rate for the random forest model is 49.56%,Most Frequent users were still predicted correctly (105 correct), and high error might be possible Although Both Random Forest and Bagging models reduced variance, but test error remained high (~48–50%). This suggests that while ensembles improve stability, the features may not strongly separate “Sometimes” from “Frequent,” as discussed in Lab 2’s Boston housing regression.
+---------------------------------------------
+
+## Problem 3: Regression – Days of Marijuana Use in Past Year
+
+```{r}
+mari_regress <- df %>%filter(IRMJFY >= 1 & IRMJFY <= 365) %>%select(IRMJFY, everything(),-MRJFLAG, -IRMJAGE, -MRJYDAYS,-IRALCFY, -MRJMDAYS,-IRCIGFM, -IRSMKLSS30N, -IRALCFM, -IRMJFM,-IRCIGAGE, -IRSMKLSSTRY, -IRALCAGE, -ALCFLAG, -TOBFLAG,-ALCYDAYS, -ALCMDAYS, -CIGMDAYS, -SMKLSMDAYS) %>% mutate(across(everything(), ~replace_na(., 0)))
+mari_regress
+
+set.seed(1234)
+train_ind <- sample(1:nrow(mari_regress), floor(0.7 * nrow(mari_regress)))
+train <- mari_regress[train_ind, ]
+test <- mari_regress[-train_ind, ]
+dim(train)
+dim(test)
+```
+For this regression task, we predicted IRMJFY — the number of days a respondent used marijuana in the past year (ranging from 1 to 365).first did  filtered out invalid or imputed values also filled all remaining NA's with 0 to ensure a clean input for tree-based models.then split the data \
+-Training set: 934 records\
+-Test set: 401 records\
+
+
+
+
+### Regression Tree and Evaluation
+```{r}
+reg_tree <- tree(IRMJFY ~ ., data = train)
+summary(reg_tree)
+plot(reg_tree)
+text(reg_tree, pretty = 0)
+reg_pred <- predict(reg_tree, newdata = test)
+reg_mse <- mean((test$IRMJFY - reg_pred)^2)
+cat("unpruned Test MSE :", round(reg_mse, 2), "\n")
+```
+The regression tree’s root node split on YOSELL2 (whether the youth reported ever selling illegal drugs). This reflects a risk clustering effect, consistent with what we observed in the Carseats example — where predictors like price and shelf location identified target behavior.
+
+Additional splits such as EDUSKPCOM (school skipping), PRMJMO (parental views on monthly marijuana), and ARGUPAR (family conflict) further differentiated high-usage youth, reinforcing the multi-domain impact (peer, school, family) seen in the codebook’s “Youth Experiences” section.
+
+
+
+
+### Cross-validation and Pruning
+```{r}
+cv_tree <- cv.tree(reg_tree)
+plot(cv_tree$size, cv_tree$dev, type = "b")
+best_size <- cv_tree$size[which.min(cv_tree$dev)]
+reg_pruned <- prune.tree(reg_tree, best = best_size)
+pruned_pred <- predict(reg_pruned, newdata = test)
+pruned_mse <- mean((test$IRMJFY - pruned_pred)^2)
+cat("pruned test MSE:", round(pruned_mse, 2), "\n")
+```
+To avoid overfitting, we used cross-validation to select the optimal tree size. The plot shows the test deviance decreasing sharply until a tree size of 3,  The optimal tree size chosen was 3, balancing model complexity and performance.The pruned tree's test MSE improved slightly to 10,157.17, compared to 10,280.03 for the unpruned tree.
+
+
+
+### Random Forest with Tuning
+```{r}
+rf_model <- randomForest(IRMJFY ~ ., data = train, importance = TRUE)
+rf_pred <- predict(rf_model, newdata = test)
+rf_mse <- mean((rf_pred - test$IRMJFY)^2)
+cat("RandForest test MSE:", round(rf_mse, 2), "\n")
+
+# different mtry
+mtry_vals <- c(5, 10, 15, 20, 30)
+mse_results <- map_dbl(mtry_vals, ~{model <- randomForest(IRMJFY ~ ., data = train, mtry = .x)
+pred <- predict(model, test) 
+mean((test$IRMJFY - pred)^2)})
+data.frame(mtry = mtry_vals, MSE = round(mse_results, 2)) #reference https://www.w3schools.com/r/r_data_frames.asp
+```
+We trained a random forest model to predict the number of days marijuana was used in the past year (IRMJFY). The initial default model produced a test MSE of 9671.09, which already outperformed both the pruned and unpruned trees.then further further optimize , we tuned the mtry parameter, number of predictors considered at each split and we saw The lowest test MSE  9480.99 when mtry = 10,say that tuning mtry improves prediction accuracy
+
+
+## Variable Importance Plot
+
+```{r}
+varImpPlot(rf_model)
+cat("Model MSE Comparison:\n")
+cat("Unpruned Tree:", round(reg_mse, 2), "\n")
+cat("Pruned Tree:", round(pruned_mse, 2), "\n")
+cat("RF BEst:", round(min(mse_results), 2))
+```
+After pruning using cross-validated deviance, the model slightly improved — dropping from 10,280 to 10,157 in test MSE.
+
+
+At Last across all three modeling tasks, predictors such as peer disapproval, school connectedness, and parental monitoring emerged as consistently associated with youth drug use.\
+
+-In the binary model, non-users were primarily characterized by having peers who disapproved of marijuana use.
+
+-In the multi-class model, youth who skipped fewer school days and reported higher parental disapproval were less likely to be in the “Frequent” group.
+
+-In the regression model, drug-selling history and low parental disapproval were linked to higher marijuana use frequency over the year.
